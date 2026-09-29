@@ -1,6 +1,6 @@
 {
   "name": "pi-chatgpt-pool",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pool several Sign in with ChatGPT accounts in pi, with routing strategies, failover, and banked resets",
   "keywords": [
     "pi-package",
