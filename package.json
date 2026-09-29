@@ -1,0 +1,28 @@
+{
+  "name": "pi-chatgpt-pool",
+  "version": "0.1.0",
+  "description": "Pool several Sign in with ChatGPT accounts in pi and fail over when one hits a rate or usage limit",
+  "keywords": ["pi-package", "pi-extension", "openai", "chatgpt", "oauth", "failover"],
+  "license": "MIT",
+  "type": "module",
+  "files": ["src", "README.md", "LICENSE"],
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.99.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}
