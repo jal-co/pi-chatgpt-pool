@@ -4,6 +4,7 @@ import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import {
 	failoverMessage,
 	limitCooldown,
+	loginName,
 	nextAccountId,
 	orderAccounts,
 	parseResetAt,
@@ -116,4 +117,10 @@ test("use it or lose it prefers the window that resets soonest", () => {
 test("the failover message is one pi retries", () => {
 	const message = { role: "assistant", stopReason: "error", errorMessage: failoverMessage("personal") } as const;
 	assert.equal(isRetryableAssistantError({ ...message, content: [], api: "openai-responses", provider: "chatgpt-1", model: "m", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, timestamp: 0 }), true);
+});
+
+test("login names default to the label and can be customized", () => {
+	assert.equal(loginName({ id: "chatgpt-1", label: "work" }), "ChatGPT (work)");
+	assert.equal(loginName({ id: "chatgpt-1", label: "work", name: "Mastra (jal@mastra.ai)" }), "Mastra (jal@mastra.ai)");
+	assert.equal(loginName({ id: "chatgpt-1", label: "work", name: "" }), "ChatGPT (work)");
 });

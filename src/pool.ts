@@ -1,4 +1,8 @@
-export type Account = { id: string; label: string; resetsAt?: number };
+export type Account = { id: string; label: string; name?: string; resetsAt?: number };
+
+export function loginName(account: Account): string {
+	return account.name || `ChatGPT (${account.label})`;
+}
 
 const USAGE_LIMIT = /usage.?limit|subscription_sharing_usage_limit_exceeded|insufficient_quota|quota/i;
 const RATE_LIMIT = /rate.?limit|too many requests|\b429\b/i;

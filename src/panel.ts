@@ -1,7 +1,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Key, matchesKey, truncateToWidth, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { formatIn, formatWindow, usageBar } from "./format.ts";
-import type { Account } from "./pool.ts";
+import { type Account, loginName } from "./pool.ts";
 import type { Usage } from "./usage.ts";
 
 export type AccountStatus = { account: Account; signedIn: boolean; usage?: Usage; error?: string };
@@ -11,12 +11,13 @@ export type PanelAction =
 	| { type: "refresh" }
 	| { type: "add" }
 	| { type: "strategy" }
-	| { type: "spend" | "clear" | "remove"; accountId: string };
+	| { type: "spend" | "clear" | "remove" | "name"; accountId: string };
 
-const ACCOUNT_KEYS = new Map<string, "spend" | "clear" | "remove">([
+const ACCOUNT_KEYS = new Map<string, "spend" | "clear" | "remove" | "name">([
 	["s", "spend"],
 	["c", "clear"],
 	["d", "remove"],
+	["n", "name"],
 ]);
 const POOL_KEYS = new Map<string, "refresh" | "add" | "strategy">([
 	["r", "refresh"],
@@ -25,9 +26,9 @@ const POOL_KEYS = new Map<string, "refresh" | "add" | "strategy">([
 ]);
 const BAR_WIDTH = 16;
 const HINTS = [
-	"↑↓ select · s spend reset · c clear limit · d remove · a add · t strategy · r refresh · esc close",
-	"↑↓ · s spend · c clear · d remove · a add · t strategy · r refresh · esc",
-	"s spend · c clear · d del · a add · t strat · esc",
+	"↑↓ select · s spend reset · c clear limit · n login name · d remove · a add · t strategy · r refresh · esc close",
+	"↑↓ · s spend · c clear · n name · d remove · a add · t strategy · r refresh · esc",
+	"s spend · c clear · n name · d del · a add · esc",
 ];
 
 export class PoolPanel implements Component {
@@ -95,7 +96,7 @@ export class PoolPanel implements Component {
 				: "";
 		const header = `${pointer}${name}${active}  ${state}${banked}`;
 
-		if (!signedIn) return [header, theme.fg("dim", `    run /login and pick ChatGPT (${account.label})`)];
+		if (!signedIn) return [header, theme.fg("dim", `    run /login and pick ${loginName(account)}`)];
 		if (!usage) return [header, theme.fg("dim", `    usage unavailable${error ? `: ${error}` : ""}`)];
 		return [
 			header,

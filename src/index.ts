@@ -8,6 +8,7 @@ import {
 	isStrategy,
 	failoverMessage,
 	limitCooldown,
+	loginName,
 	nextAccountId,
 	orderAccounts,
 	parseResetAt,
@@ -79,7 +80,7 @@ function subscriptionModels(providers: readonly Provider[]): Model<Api>[] {
 }
 
 function accountProvider(openai: Provider, account: Account, onReset: ResetListener): Provider {
-	const name = `ChatGPT (${account.label})`;
+	const name = loginName(account);
 	const signIn = openai.auth.oauth;
 	if (!signIn) throw new Error("pi's openai provider has no Sign in with ChatGPT flow; update pi to 0.99.1 or later");
 	const models: Model<Api>[] = subscriptionModels(builtinProviders()).map((model) => ({
@@ -283,7 +284,7 @@ export default function chatgptPool(pi: ExtensionAPI) {
 
 	const describe = ({ account, signedIn, usage, error }: AccountStatus): string => {
 		const limitedUntil = account.resetsAt && account.resetsAt > Date.now() ? account.resetsAt : undefined;
-		if (!signedIn) return `${account.label}  ·  not signed in, run /login and pick ChatGPT (${account.label})`;
+		if (!signedIn) return `${account.label}  ·  not signed in, run /login and pick ${loginName(account)}`;
 		const state = limitedUntil ? `limited until ${formatReset(limitedUntil)}` : "ready";
 		if (!usage) return `${account.label}  ·  ${state}  ·  usage unavailable${error ? ` (${error})` : ""}`;
 		const windows = usage.windows.map(
@@ -305,7 +306,25 @@ export default function chatgptPool(pi: ExtensionAPI) {
 		update((config) => ({ ...config, accounts: [...config.accounts, account] }));
 		registerPooledModels();
 		pi.registerProvider(accountProvider(openai, account, onReset));
-		ctx.ui.notify(`Added ChatGPT (${label}). Run /login and pick it to sign in.`, "info");
+		ctx.ui.notify(`Added ${loginName(account)}. Run /login and pick it to sign in.`, "info");
+	};
+
+	const setLoginName = (ctx: ExtensionContext, account: Account, name: string) => {
+		const next = { ...account, name: name.trim() || undefined };
+		update((config) => ({
+			...config,
+			accounts: config.accounts.map((candidate) => (candidate.id === account.id ? next : candidate)),
+		}));
+		pi.registerProvider(accountProvider(openai, next, onReset));
+		ctx.ui.notify(`${account.label} now shows as "${loginName(next)}" in /login. Its sign-in is unchanged.`, "info");
+	};
+
+	const askLoginName = async (ctx: ExtensionContext, account: Account) => {
+		const name = await ctx.ui.input(
+			`Name shown in /login for ${account.label} (empty for "ChatGPT (${account.label})")`,
+			loginName(account),
+		);
+		if (name !== undefined) setLoginName(ctx, account, name);
 	};
 
 	const removeAccount = (ctx: ExtensionContext, account: Account) => {
@@ -386,6 +405,8 @@ export default function chatgptPool(pi: ExtensionAPI) {
 			} else if (status && action.type === "spend") {
 				await spend(ctx, status.account, status.usage);
 				reload = true;
+			} else if (status && action.type === "name") {
+				await askLoginName(ctx, status.account);
 			} else if (status && action.type === "clear") {
 				setResetsAt(status.account.id, undefined);
 				ctx.ui.notify(`ChatGPT (${status.account.label}) is back in rotation.`, "info");
@@ -441,12 +462,13 @@ export default function chatgptPool(pi: ExtensionAPI) {
 		{ value: "add", label: "add", description: "Add an account slot" },
 		{ value: "remove", label: "remove", description: "Remove an account" },
 		{ value: "spend", label: "spend", description: "Spend a banked reset, after confirming" },
+		{ value: "name", label: "name", description: "Set the name an account shows in /login" },
 		{ value: "reset", label: "reset", description: "Forget recorded limits" },
 		{ value: "strategy", label: "strategy", description: "Choose how new conversations pick an account" },
 	];
 
 	pi.registerCommand("chatgpt-pool", {
-		description: "Manage pooled ChatGPT accounts: usage, banked resets, strategy, add, remove, spend, reset",
+		description: "Manage pooled ChatGPT accounts: usage, banked resets, strategy, add, remove, name, spend, reset",
 		getArgumentCompletions(prefix) {
 			const [action, ...rest] = prefix.split(" ");
 			if (rest.length === 0) return SUBCOMMANDS.filter((item) => item.value.startsWith(action));
@@ -455,7 +477,8 @@ export default function chatgptPool(pi: ExtensionAPI) {
 					.filter(([name]) => name.startsWith(rest.join(" ")))
 					.map(([name, description]) => ({ value: `strategy ${name}`, label: name, description }));
 			}
-			if (action !== "remove" && action !== "spend") return null;
+			if (action !== "remove" && action !== "spend" && action !== "name") return null;
+			if (action === "name" && rest.length > 1) return null;
 			const partial = rest.join(" ");
 			return accounts
 				.filter((account) => account.label.startsWith(partial))
@@ -476,8 +499,16 @@ export default function chatgptPool(pi: ExtensionAPI) {
 				return removeAccount(ctx, account);
 			}
 
+			if (action === "name") {
+				const [target = "", ...nameParts] = rest;
+				const account = findAccount(target);
+				if (!account) return ctx.ui.notify("Usage: /chatgpt-pool name <label> <name shown in /login>", "warning");
+				if (nameParts.length > 0 || !ctx.hasUI) return setLoginName(ctx, account, nameParts.join(" "));
+				return askLoginName(ctx, account);
+			}
+
 			if (action === "reset") {
-				update((config) => ({ ...config, accounts: config.accounts.map(({ id, label }) => ({ id, label })) }));
+				update((config) => ({ ...config, accounts: config.accounts.map((account) => ({ ...account, resetsAt: undefined })) }));
 				updateStatus(ctx);
 				return ctx.ui.notify("Cleared recorded limits. Every signed-in account is back in rotation.", "info");
 			}
@@ -502,7 +533,7 @@ export default function chatgptPool(pi: ExtensionAPI) {
 				return spend(ctx, account);
 			}
 
-			if (action) return ctx.ui.notify(`Unknown action "${action}". Use add, remove, spend, reset, or strategy.`, "warning");
+			if (action) return ctx.ui.notify(`Unknown action "${action}". Use add, remove, name, spend, reset, or strategy.`, "warning");
 			if (accounts.length === 0) {
 				const label = (await ctx.ui.input("No ChatGPT accounts yet. Label for the first one", "personal"))?.trim();
 				if (label) addAccount(ctx, label);

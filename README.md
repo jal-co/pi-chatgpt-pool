@@ -20,7 +20,7 @@ Run `/chatgpt-pool` and choose **+ Add account**, or add them directly:
 /login
 ```
 
-`/login` lists each account as `ChatGPT (<label>)`. Sign in to each one with a different ChatGPT account. Then pick a pooled model:
+`/login` lists each account as `ChatGPT (<label>)`, or under a name you choose with `/chatgpt-pool name`. Renaming keeps the account signed in. Sign in to each one with a different ChatGPT account. Then pick a pooled model:
 
 ```text
 /model chatgpt/gpt-5.6-sol
@@ -34,6 +34,7 @@ The pool offers the ChatGPT subscription models: the OpenAI models that pi also 
 | --- | --- |
 | `/chatgpt-pool` | Open the pool panel (see below) |
 | `/chatgpt-pool add <label>` | Add an account slot. Sign in to it with `/login` |
+| `/chatgpt-pool name <label> <name>` | Set the name the account shows in `/login`, for example `Work (jal@mastra.ai)`. Leave the name empty to go back to `ChatGPT (<label>)` |
 | `/chatgpt-pool remove <label>` | Remove an account. Run `/logout` for it first to delete its token |
 | `/chatgpt-pool spend <label>` | Spend one banked reset on that account, after you confirm |
 | `/chatgpt-pool strategy <name>` | Set the routing strategy: `fill-first`, `round-robin`, `least-used`, or `use-it-or-lose-it` |
@@ -50,6 +51,7 @@ The command autocompletes its actions and account labels.
 | `↑` `↓` or `j` `k` | Select an account |
 | `s` | Spend a banked reset on the selected account, after you confirm |
 | `c` | Clear the selected account's recorded limit |
+| `n` | Set the name the selected account shows in `/login` |
 | `d` | Remove the selected account |
 | `a` | Add an account |
 | `t` | Choose the strategy |
