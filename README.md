@@ -30,21 +30,29 @@ Every OpenAI model has a pooled copy under the `chatgpt` provider. Each account 
 
 | Command | What it does |
 | --- | --- |
-| `/chatgpt-pool` | Show each account and whether it is ready, signed out, or cooling down |
+| `/chatgpt-pool` | Show each account's usage, when each window resets, and its banked resets |
 | `/chatgpt-pool add <label>` | Add an account slot. Sign in to it with `/login` |
 | `/chatgpt-pool remove <label>` | Remove an account. Run `/logout` for it first to delete its token |
-| `/chatgpt-pool reset` | Clear cooldowns, for example after a usage limit resets early |
+| `/chatgpt-pool spend <label>` | Spend one banked reset on that account, after you confirm |
+| `/chatgpt-pool reset` | Forget recorded limits, for example after a limit clears early |
 
 Accounts are stored in `~/.pi/agent/chatgpt-pool.json`. Tokens are stored by pi in `~/.pi/agent/auth.json`.
 
 ## How failover works
 
 - A conversation stays on the same account while it works, so prompt caching and reasoning replay keep working.
-- If an account returns a rate limit, it cools down for 1 minute. If it returns a usage limit, it cools down for 1 hour. The next request goes to the first ready account in the order you added them.
-- Cooldowns are in memory. Restarting pi clears them.
-- If every account is signed out or cooling down, the request fails with a message pointing to `/chatgpt-pool`.
+- When an account hits a limit, the plugin reads the reset time from the 429 response (`resets_at` in the body, `retry-after`, or the rate-limit reset headers) and skips that account until then. If the response has no reset time, it waits 1 minute for a rate limit or 1 hour for a usage limit.
+- The next request goes to the first ready account, in the order you added them.
+- Reset times are saved in `chatgpt-pool.json`, so they survive restarts.
+- If every account is signed out or limited, the request fails with a message pointing to `/chatgpt-pool`.
 
-Cooldowns use fixed lengths instead of the reset time in the error. An account can come back before pi tries it again; use `/chatgpt-pool reset` in that case.
+## Banked resets
+
+ChatGPT gives some accounts reset credits that clear a usage limit early. `/chatgpt-pool` shows how many each account has banked and how many apply right now.
+
+The plugin never spends one on its own. Run `/chatgpt-pool spend <label>` to spend one; it picks the credit that expires first and asks you to confirm. It warns you when ChatGPT reports nothing to reset.
+
+Usage and banked resets come from ChatGPT's `backend-api/wham` endpoints, the same ones the Codex CLI uses.
 
 ## Credits
 

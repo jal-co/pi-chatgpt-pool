@@ -4,7 +4,8 @@ import { getSupportedThinkingLevels, type Api, type Model, type Provider } from 
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { chatgptOAuth } from "./chatgpt-oauth.ts";
-import { type Account, limitCooldown, nextAccountId, pickAccount } from "./pool.ts";
+import { type Account, limitCooldown, nextAccountId, parseResetAt, pickAccount } from "./pool.ts";
+import { fetchUsage, spendReset, type Usage } from "./usage.ts";
 
 const POOL_PROVIDER = "chatgpt";
 const CHATGPT_COMPAT = {
@@ -27,7 +28,20 @@ function saveAccounts(accounts: readonly Account[]): void {
 	writeFileSync(configPath(), `${JSON.stringify({ accounts }, null, 2)}\n`);
 }
 
-function accountProvider(openai: Provider, account: Account): Provider {
+type ResetListener = (accountId: string, resetsAt: number) => void;
+
+function limitAwareFetch(accountId: string, onReset: ResetListener, base: typeof fetch = fetch): typeof fetch {
+	return async (input, init) => {
+		const response = await base(input, init);
+		if (response.status === 429) {
+			const resetsAt = parseResetAt(response.headers, await response.clone().text(), Date.now());
+			if (resetsAt !== undefined) onReset(accountId, resetsAt);
+		}
+		return response;
+	};
+}
+
+function accountProvider(openai: Provider, account: Account, onReset: ResetListener): Provider {
 	const name = `ChatGPT (${account.label})`;
 	const models: Model<Api>[] = openai
 		.getModels()
@@ -39,8 +53,23 @@ function accountProvider(openai: Provider, account: Account): Provider {
 		auth: { oauth: chatgptOAuth(name) },
 		getModels: () => models,
 		stream: (model, context, options) => openai.stream(model, context, options),
-		streamSimple: (model, context, options) => openai.streamSimple(model, context, options),
+		streamSimple: (model, context, options) =>
+			openai.streamSimple(model, context, { ...options, fetch: limitAwareFetch(account.id, onReset, options?.fetch) }),
 	};
+}
+
+function formatWindow(seconds: number): string {
+	if (seconds % 604800 === 0) return seconds === 604800 ? "weekly" : `${seconds / 604800}-week`;
+	if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+	return `${Math.round(seconds / 60)}m`;
+}
+
+function formatReset(at: number): string {
+	const date = new Date(at);
+	const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+	return date.toDateString() === new Date().toDateString()
+		? `at ${time}`
+		: `${date.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} at ${time}`;
 }
 
 export default function chatgptPool(pi: ExtensionAPI) {
@@ -48,14 +77,21 @@ export default function chatgptPool(pi: ExtensionAPI) {
 	if (!openai) throw new Error("pi-chatgpt-pool needs pi's built-in openai provider");
 
 	let accounts = loadAccounts();
-	const cooldowns = new Map<string, number>();
+	const reportedResets = new Map<string, number>();
+	const onReset: ResetListener = (accountId, resetsAt) => reportedResets.set(accountId, resetsAt);
 
-	const isUsable = (ctx: ExtensionContext, accountId: string, modelId: string) => {
-		const model = ctx.modelRegistry.find(accountId, modelId);
-		return (cooldowns.get(accountId) ?? 0) <= Date.now() && !!model && ctx.modelRegistry.hasConfiguredAuth(model);
+	const setResetsAt = (accountId: string, resetsAt: number | undefined) => {
+		accounts = accounts.map((account) => (account.id === accountId ? { ...account, resetsAt } : account));
+		saveAccounts(accounts);
 	};
 
-	for (const account of accounts) pi.registerProvider(accountProvider(openai, account));
+	const isUsable = (ctx: ExtensionContext, accountId: string, modelId: string) => {
+		const account = accounts.find((candidate) => candidate.id === accountId);
+		const model = ctx.modelRegistry.find(accountId, modelId);
+		return (account?.resetsAt ?? 0) <= Date.now() && !!model && ctx.modelRegistry.hasConfiguredAuth(model);
+	};
+
+	for (const account of accounts) pi.registerProvider(accountProvider(openai, account, onReset));
 
 	for (const model of openai.getModels()) {
 		pi.registerVirtualModel({
@@ -74,7 +110,7 @@ export default function chatgptPool(pi: ExtensionAPI) {
 					throw new Error(
 						accounts.length === 0
 							? "No ChatGPT accounts in the pool. Run /chatgpt-pool add <label>, then /login."
-							: "Every ChatGPT account in the pool is signed out or rate limited. Run /chatgpt-pool to check.",
+							: "Every ChatGPT account in the pool is signed out or limited. Run /chatgpt-pool to see reset times and banked resets.",
 					);
 				}
 				return { model: routed, thinkingLevel: request.thinkingLevel };
@@ -86,9 +122,11 @@ export default function chatgptPool(pi: ExtensionAPI) {
 		const message = event.message;
 		if (message.role !== "assistant" || message.stopReason !== "error") return;
 		const account = accounts.find((candidate) => candidate.id === message.provider);
+		const reported = account && reportedResets.get(account.id);
+		if (account) reportedResets.delete(account.id);
 		const cooldown = limitCooldown(message.errorMessage);
-		if (!account || cooldown === undefined) return;
-		cooldowns.set(account.id, Date.now() + cooldown);
+		if (!account || (cooldown === undefined && reported === undefined)) return;
+		setResetsAt(account.id, reported ?? Date.now() + (cooldown ?? 0));
 		if (ctx.model?.provider !== POOL_PROVIDER) return;
 		if (!pickAccount(accounts, (id) => isUsable(ctx, id, message.model), undefined)) return;
 		return {
@@ -100,7 +138,7 @@ export default function chatgptPool(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("chatgpt-pool", {
-		description: "List pooled ChatGPT accounts, or add <label> / remove <label> / reset cooldowns",
+		description: "Show usage and banked resets, or add <label> / remove <label> / spend <label> / reset",
 		async handler(args, ctx) {
 			const [action, ...rest] = args.trim().split(/\s+/);
 			const label = rest.join(" ");
@@ -110,7 +148,7 @@ export default function chatgptPool(pi: ExtensionAPI) {
 				const account = { id: nextAccountId(accounts), label };
 				accounts = [...accounts, account];
 				saveAccounts(accounts);
-				pi.registerProvider(accountProvider(openai, account));
+				pi.registerProvider(accountProvider(openai, account, onReset));
 				return ctx.ui.notify(`Added ChatGPT (${label}). Run /login and choose it to sign in.`, "info");
 			}
 
@@ -127,23 +165,69 @@ export default function chatgptPool(pi: ExtensionAPI) {
 			}
 
 			if (action === "reset") {
-				cooldowns.clear();
-				return ctx.ui.notify("Cleared ChatGPT pool cooldowns.", "info");
+				accounts = accounts.map(({ id, label }) => ({ id, label }));
+				saveAccounts(accounts);
+				return ctx.ui.notify("Cleared ChatGPT pool limits. Every signed-in account is ready again.", "info");
+			}
+
+			if (action === "spend") {
+				const account = accounts.find((candidate) => candidate.label === label || candidate.id === label);
+				if (!account) return ctx.ui.notify("Usage: /chatgpt-pool spend <label>", "warning");
+				const token = await ctx.modelRegistry.getApiKeyForProvider(account.id);
+				if (!token) return ctx.ui.notify(`ChatGPT (${account.label}) is not signed in.`, "warning");
+				const usage = await fetchUsage(token);
+				const credit = [...usage.credits].sort(
+					(a, b) => (a.expiresAt ?? Number.POSITIVE_INFINITY) - (b.expiresAt ?? Number.POSITIVE_INFINITY),
+				)[0];
+				if (!credit) return ctx.ui.notify(`ChatGPT (${account.label}) has no banked resets.`, "info");
+				const warning =
+					usage.usableNow === 0 ? " ChatGPT reports nothing to reset right now, so this may not change anything." : "";
+				const confirmed = await ctx.ui.confirm(
+					`Spend a banked reset on ${account.label}?`,
+					`Uses "${credit.title}"${credit.expiresAt ? `, expiring ${formatReset(credit.expiresAt)}` : ""}. ${usage.banked} banked in total.${warning}`,
+				);
+				if (!confirmed) return ctx.ui.notify("No reset spent.", "info");
+				const outcome = await spendReset(token, credit.id);
+				if (outcome === "reset") setResetsAt(account.id, undefined);
+				return ctx.ui.notify(
+					{
+						reset: `Spent a banked reset. ChatGPT (${account.label}) is ready again.`,
+						nothing_to_reset: `ChatGPT (${account.label}) had nothing to reset, so no reset was spent.`,
+						no_credit: `ChatGPT (${account.label}) has no banked resets left.`,
+						already_redeemed: "That reset was already spent.",
+					}[outcome],
+					outcome === "reset" ? "info" : "warning",
+				);
 			}
 
 			if (accounts.length === 0) {
 				return ctx.ui.notify("No ChatGPT accounts yet. Run /chatgpt-pool add <label>.", "info");
 			}
-			const lines = accounts.map((account) => {
-				const until = cooldowns.get(account.id) ?? 0;
-				const status = !ctx.modelRegistry.getProviderAuthStatus(account.id).configured
-					? "not signed in"
-					: until > Date.now()
-						? `cooling down until ${new Date(until).toLocaleTimeString()}`
-						: "ready";
-				return `${account.label} (${account.id}): ${status}`;
-			});
-			ctx.ui.notify(lines.join("\n"), "info");
+			const lines = await Promise.all(
+				accounts.map(async (account) => {
+					const token = await ctx.modelRegistry.getApiKeyForProvider(account.id).catch(() => undefined);
+					if (!token) return `${account.label}: not signed in`;
+					const usage: Usage | Error = await fetchUsage(token).catch((error: Error) => error);
+					if (usage instanceof Error) {
+						const until = account.resetsAt ?? 0;
+						const state = until > Date.now() ? `limited, resets ${formatReset(until)}` : "ready";
+						return `${account.label}: ${state} (usage unavailable: ${usage.message})`;
+					}
+					const limitedUntil = usage.limitReached ? Math.max(...usage.windows.map((w) => w.resetsAt)) : undefined;
+					if (limitedUntil !== account.resetsAt && (usage.limitReached || (account.resetsAt ?? 0) > Date.now())) {
+						setResetsAt(account.id, limitedUntil);
+					}
+					const windows = usage.windows
+						.map((w) => `${formatWindow(w.windowSeconds)} ${Math.round(w.usedPercent)}% used, resets ${formatReset(w.resetsAt)}`)
+						.join("; ");
+					const banked =
+						usage.banked === 0
+							? "no banked resets"
+							: `${usage.banked} banked reset${usage.banked === 1 ? "" : "s"}${usage.usableNow > 0 ? ` (${usage.usableNow} usable now)` : ""}`;
+					return `${account.label}: ${usage.limitReached ? "LIMITED" : "ready"}. ${windows || "no usage windows"}. ${banked}`;
+				}),
+			);
+			ctx.ui.notify(`${lines.join("\n")}\n\nSpend a banked reset with /chatgpt-pool spend <label>.`, "info");
 		},
 	});
 }
