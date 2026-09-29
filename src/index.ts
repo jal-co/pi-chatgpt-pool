@@ -114,7 +114,8 @@ export default function chatgptPool(pi: ExtensionAPI) {
 	};
 	const usageCache = new Map<string, { snapshot: UsageSnapshot; at: number }>();
 
-	const rememberUsage = (accountId: string, usage: Usage) => {
+	const rememberUsage = (accountId: string, usage: Usage | undefined) => {
+		if (!usage) return;
 		const snapshot = snapshotOf(usage);
 		if (snapshot) usageCache.set(accountId, { snapshot, at: Date.now() });
 	};
@@ -260,6 +261,7 @@ export default function chatgptPool(pi: ExtensionAPI) {
 				if (!token || signal?.aborted) return { account, signedIn: !!token };
 				try {
 					const usage = await fetchUsage(token);
+					if (!usage) return { account, signedIn: true };
 					rememberUsage(account.id, usage);
 					const limitedUntil = usage.limitReached ? Math.max(...usage.windows.map((w) => w.resetsAt)) : undefined;
 					if (limitedUntil !== account.resetsAt && (usage.limitReached || (account.resetsAt ?? 0) > Date.now())) {
@@ -285,8 +287,8 @@ export default function chatgptPool(pi: ExtensionAPI) {
 	const describe = ({ account, signedIn, usage, error }: AccountStatus): string => {
 		const limitedUntil = account.resetsAt && account.resetsAt > Date.now() ? account.resetsAt : undefined;
 		if (!signedIn) return `${account.label}  ·  not signed in, run /chatgpt-pool login ${account.label}`;
-		const state = limitedUntil ? `limited until ${formatReset(limitedUntil)}` : "ready";
-		if (!usage) return `${account.label}  ·  ${state}  ·  usage unavailable${error ? ` (${error})` : ""}`;
+		const state = limitedUntil ? `limited until ${formatReset(limitedUntil)}` : usage ? "ready" : "signed in";
+		if (!usage) return `${account.label}  ·  ${state}${error ? `  ·  ${error}` : ""}`;
 		const windows = usage.windows.map(
 			(w) => `${formatWindow(w.windowSeconds)} ${Math.round(w.usedPercent)}%, resets ${formatReset(w.resetsAt)}`,
 		);
@@ -350,7 +352,7 @@ export default function chatgptPool(pi: ExtensionAPI) {
 		const token = await ctx.modelRegistry.getApiKeyForProvider(account.id);
 		if (!token) return ctx.ui.notify(`ChatGPT (${account.label}) is not signed in.`, "warning");
 		const usage = known ?? (await withLoader(ctx, `Checking ${account.label}...`, () => fetchUsage(token)));
-		if (!usage) return;
+		if (!usage) return ctx.ui.notify("Banked resets are unavailable for this sign-in. No reset spent.", "info");
 		const credit = [...usage.credits].sort(
 			(a, b) => (a.expiresAt ?? Number.POSITIVE_INFINITY) - (b.expiresAt ?? Number.POSITIVE_INFINITY),
 		)[0];
@@ -471,7 +473,6 @@ export default function chatgptPool(pi: ExtensionAPI) {
 	const SUBCOMMANDS = [
 		{ value: "add", label: "add", description: "Add an account slot" },
 		{ value: "remove", label: "remove", description: "Remove an account" },
-		{ value: "spend", label: "spend", description: "Spend a banked reset, after confirming" },
 		{ value: "login", label: "login", description: "Sign in to an account" },
 		{ value: "name", label: "name", description: "Set the name an account shows in /login" },
 		{ value: "reset", label: "reset", description: "Forget recorded limits" },
@@ -479,7 +480,7 @@ export default function chatgptPool(pi: ExtensionAPI) {
 	];
 
 	pi.registerCommand("chatgpt-pool", {
-		description: "Manage pooled ChatGPT accounts: usage, banked resets, strategy, add, login, remove, name, spend, reset",
+		description: "Manage pooled ChatGPT accounts: sign-in, strategy, add, remove, name, reset",
 		getArgumentCompletions(prefix) {
 			const [action, ...rest] = prefix.split(" ");
 			if (rest.length === 0) return SUBCOMMANDS.filter((item) => item.value.startsWith(action));
@@ -550,7 +551,7 @@ export default function chatgptPool(pi: ExtensionAPI) {
 				return spend(ctx, account);
 			}
 
-			if (action) return ctx.ui.notify(`Unknown action "${action}". Use add, login, remove, name, spend, reset, or strategy.`, "warning");
+			if (action) return ctx.ui.notify(`Unknown action "${action}". Use add, login, remove, name, reset, or strategy.`, "warning");
 			if (accounts.length === 0) {
 				const label = (await ctx.ui.input("No ChatGPT accounts yet. Label for the first one", "personal"))?.trim();
 				if (label) addAccount(ctx, label);

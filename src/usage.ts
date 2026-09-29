@@ -22,25 +22,31 @@ export type Usage = {
 };
 export type SpendOutcome = ConsumeResponse["code"];
 
-function accountIdFromToken(token: string): string | undefined {
+type TokenClaims = { scope?: string; "https://api.openai.com/auth"?: { chatgpt_account_id?: string } };
+
+function tokenClaims(token: string): TokenClaims | undefined {
 	const payload = token.split(".")[1];
 	if (!payload) return undefined;
 	try {
-		return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"))["https://api.openai.com/auth"]
-			?.chatgpt_account_id;
+		return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
 	} catch {
 		return undefined;
 	}
 }
 
+function supportsUsage(token: string): boolean {
+	const claims = tokenClaims(token);
+	return !(typeof claims?.scope === "string" && claims.scope.split(/\s+/).includes("chatgpt.tokens.use.direct"));
+}
+
 async function backend<T>(token: string, path: string, init: RequestInit = {}): Promise<T> {
+	if (!supportsUsage(token)) throw new Error("Banked resets are unavailable for ChatGPT subscription-sharing sign-ins.");
 	const headers = new Headers({ authorization: `Bearer ${token}`, "content-type": "application/json" });
-	const accountId = accountIdFromToken(token);
+	const accountId = tokenClaims(token)?.["https://api.openai.com/auth"]?.chatgpt_account_id;
 	if (accountId) headers.set("chatgpt-account-id", accountId);
 	const response = await fetch(`${BACKEND}/${path}`, { ...init, headers, signal: AbortSignal.timeout(15_000) });
 	if (!response.ok) {
-		const body = await response.text().catch(() => "");
-		throw new Error(`ChatGPT ${path} failed (${response.status})${body ? `: ${body.slice(0, 200)}` : ""}`);
+		throw new Error(`ChatGPT ${path} failed (${response.status}).`);
 	}
 	return response.json();
 }
@@ -50,7 +56,8 @@ function toWindow(window: Window | null | undefined): UsageWindow[] {
 	return [{ usedPercent: window.used_percent, windowSeconds: window.limit_window_seconds, resetsAt: window.reset_at * 1000 }];
 }
 
-export async function fetchUsage(token: string): Promise<Usage> {
+export async function fetchUsage(token: string): Promise<Usage | undefined> {
+	if (!supportsUsage(token)) return undefined;
 	const [usage, credits] = await Promise.all([
 		backend<UsageResponse>(token, "usage"),
 		backend<CreditsResponse>(token, "rate-limit-reset-credits"),

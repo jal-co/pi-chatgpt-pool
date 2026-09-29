@@ -54,6 +54,7 @@ export class PoolPanel implements Component {
 		const poolAction = POOL_KEYS.get(data);
 		const accountAction = ACCOUNT_KEYS.get(data);
 		const account = this.statuses[this.selected]?.account;
+		if (accountAction === "spend" && !this.statuses[this.selected]?.usage?.banked) return;
 		if (poolAction) this.done({ type: poolAction });
 		else if (accountAction && account) this.done({ type: accountAction, accountId: account.id });
 	}
@@ -70,7 +71,10 @@ export class PoolPanel implements Component {
 		];
 		if (this.statuses.length === 0) lines.push(theme.fg("muted", "No accounts yet. Press a to add one."), "");
 		this.statuses.forEach((status, index) => lines.push(...this.renderAccount(status, index === this.selected), ""));
-		const hint = HINTS.find((text) => visibleWidth(text) <= width) ?? HINTS[HINTS.length - 1];
+		const hints = this.statuses[this.selected]?.usage?.banked
+			? HINTS
+			: HINTS.map((text) => text.replace(/s spend(?: reset)? · /g, ""));
+		const hint = hints.find((text) => visibleWidth(text) <= width) ?? hints[hints.length - 1];
 		lines.push(theme.fg("dim", hint), rule);
 		return lines.map((line) => truncateToWidth(line, width));
 	}
@@ -92,7 +96,7 @@ export class PoolPanel implements Component {
 			? theme.fg("muted", "not signed in")
 			: limitedUntil
 				? theme.fg("warning", `limited · back in ${formatIn(limitedUntil - now)}`)
-				: theme.fg("success", "ready");
+				: usage ? theme.fg("success", "ready") : theme.fg("muted", "signed in");
 		const banked =
 			usage && usage.banked > 0
 				? theme.fg("accent", `  ${usage.banked} banked reset${usage.banked === 1 ? "" : "s"}`) +
@@ -101,7 +105,7 @@ export class PoolPanel implements Component {
 		const header = `${pointer}${name}${active}  ${state}${banked}`;
 
 		if (!signedIn) return [header, theme.fg("dim", "    press enter to sign in")];
-		if (!usage) return [header, theme.fg("dim", `    usage unavailable${error ? `: ${error}` : ""}`)];
+		if (!usage) return error ? [header, theme.fg("muted", `    ${error}`)] : [header];
 		return [
 			header,
 			...usage.windows.map((window) => {

@@ -38,7 +38,6 @@ The pool offers the ChatGPT subscription models: the OpenAI models that pi also 
 | `/chatgpt-pool login <label>` | Fill in `/login` for that account, so Enter starts its sign-in |
 | `/chatgpt-pool name <label> <name>` | Set the name the account shows in `/login`, for example `Work (jal@mastra.ai)`. Leave the name empty to go back to `ChatGPT (<label>)` |
 | `/chatgpt-pool remove <label>` | Remove an account. Run `/logout` for it first to delete its token |
-| `/chatgpt-pool spend <label>` | Spend one banked reset on that account, after you confirm |
 | `/chatgpt-pool strategy <name>` | Set the routing strategy: `fill-first`, `round-robin`, `least-used`, or `use-it-or-lose-it` |
 | `/chatgpt-pool reset` | Forget recorded limits, for example after a limit clears early |
 
@@ -46,13 +45,12 @@ The command autocompletes its actions and account labels.
 
 ## Pool panel
 
-`/chatgpt-pool` opens a panel with every account, its state (ready, limited with a countdown, or not signed in), a usage bar per window with the time until it resets, and its banked resets.
+`/chatgpt-pool` shows each account's sign-in status and any recorded limit countdown. Usage meters and banked resets are hidden for ChatGPT subscription-sharing sign-ins until a compatible usage endpoint is verified. Opening the panel does not send rejected Codex usage requests.
 
 | Key | Action |
 | --- | --- |
 | `↑` `↓` or `j` `k` | Select an account |
 | `enter` | Sign in to the selected account (fills in `/login` for it; press Enter again) |
-| `s` | Spend a banked reset on the selected account, after you confirm |
 | `c` | Clear the selected account's recorded limit |
 | `n` | Set the name the selected account shows in `/login` |
 | `d` | Remove the selected account |
@@ -63,7 +61,7 @@ The command autocompletes its actions and account labels.
 
 Over RPC the same actions are offered as a list instead.
 
-While a pooled model is selected, the footer shows the account in use with its usage and reset time, for example `chatgpt: work 42% · resets in 3d 4h`, plus how many accounts are limited. When a conversation moves to another account, pi shows a notice such as `ChatGPT pool: personal is limited (back in 1h 30m), switched to work.`
+While a pooled model is selected, the footer shows the account in use, for example `chatgpt: work`, plus how many accounts have recorded limits and when the next one returns. When a conversation moves to another account, pi shows a notice such as `ChatGPT pool: personal is limited (back in 1h 30m), switched to work.`
 
 `/chatgpt-pool` and `spend` need the interactive UI; in `--print` or `--mode json` they stop with an error instead of spending anything. From a shell, use pi's own commands:
 
@@ -86,7 +84,7 @@ A conversation stays on the same account while it works, so prompt caching and r
 | Least used | The account with the lowest usage % |
 | Use it or lose it | The account whose usage window resets soonest, so its remaining quota isn't wasted |
 
-Choose one from the **Strategy** row in `/chatgpt-pool`, or run `/chatgpt-pool strategy <name>`. It's saved in `chatgpt-pool.json`, and the round-robin position is shared across pi sessions. Least used and use it or lose it read usage from ChatGPT, cached for 5 minutes; accounts whose usage can't be read go last.
+Choose one from the **Strategy** row in `/chatgpt-pool`, or run `/chatgpt-pool strategy <name>`. It's saved in `chatgpt-pool.json`, and the round-robin position is shared across pi sessions. Least used and use it or lose it require usage data. The current ChatGPT sign-in flow cannot read it, so these strategies use the configured account order. Round robin spreads new conversations without usage data.
 
 ## How failover works
 
@@ -95,13 +93,11 @@ Choose one from the **Strategy** row in `/chatgpt-pool`, or run `/chatgpt-pool s
 - Reset times are saved in `chatgpt-pool.json`, so they survive restarts.
 - If every account is signed out or limited, the request fails with a message pointing to `/chatgpt-pool`.
 
-## Banked resets
+## Usage and banked resets
 
-ChatGPT gives some accounts reset credits that clear a usage limit early. `/chatgpt-pool` shows how many each account has banked and how many apply right now.
+OpenAI's subscription-sharing sign-in tokens are not accepted by the Codex `backend-api/wham` usage service. Usage meters and banked-reset actions are hidden for these accounts. No reset is spent, and the pool never spends one automatically. Recorded limits and failover still work from inference errors.
 
-The plugin never spends one on its own. Pick the account in `/chatgpt-pool`, or run `/chatgpt-pool spend <label>`. It picks the credit that expires first and asks you to confirm. It warns you when ChatGPT reports nothing to reset.
-
-Usage and banked resets come from ChatGPT's `backend-api/wham` endpoints, the same ones the Codex CLI uses.
+Review actual usage in [ChatGPT Usage settings](https://chatgpt.com/settings/usage). Codex reset credits have not been verified to reset subscription-sharing limits.
 
 ## Releasing
 
