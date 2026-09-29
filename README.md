@@ -12,6 +12,8 @@ Requires pi 0.99 or later.
 
 ## Set up accounts
 
+Run `/chatgpt-pool` and choose **+ Add account**, or add them directly:
+
 ```text
 /chatgpt-pool add personal
 /chatgpt-pool add work
@@ -30,11 +32,21 @@ Every OpenAI model has a pooled copy under the `chatgpt` provider. Each account 
 
 | Command | What it does |
 | --- | --- |
-| `/chatgpt-pool` | Show each account's usage, when each window resets, and its banked resets |
+| `/chatgpt-pool` | Open the pool: each account's usage, reset times, and banked resets. Pick an account to spend a reset, clear its limit, or remove it |
 | `/chatgpt-pool add <label>` | Add an account slot. Sign in to it with `/login` |
 | `/chatgpt-pool remove <label>` | Remove an account. Run `/logout` for it first to delete its token |
 | `/chatgpt-pool spend <label>` | Spend one banked reset on that account, after you confirm |
 | `/chatgpt-pool reset` | Forget recorded limits, for example after a limit clears early |
+
+The command autocompletes its actions and account labels. The footer shows `chatgpt: <account>` while a pooled model is selected, plus how many accounts are limited and when the next one comes back.
+
+`/chatgpt-pool` and `spend` need the interactive UI; in `--print` or `--mode json` they stop with an error instead of spending anything. From a shell, use pi's own commands:
+
+```bash
+pi auth check --provider chatgpt-1     # is this account signed in?
+pi --list-models chatgpt               # pooled models
+pi --model chatgpt/gpt-5.6-sol         # start pi on the pool
+```
 
 Accounts are stored in `~/.pi/agent/chatgpt-pool.json`. Tokens are stored by pi in `~/.pi/agent/auth.json`.
 
@@ -50,7 +62,7 @@ Accounts are stored in `~/.pi/agent/chatgpt-pool.json`. Tokens are stored by pi 
 
 ChatGPT gives some accounts reset credits that clear a usage limit early. `/chatgpt-pool` shows how many each account has banked and how many apply right now.
 
-The plugin never spends one on its own. Run `/chatgpt-pool spend <label>` to spend one; it picks the credit that expires first and asks you to confirm. It warns you when ChatGPT reports nothing to reset.
+The plugin never spends one on its own. Pick the account in `/chatgpt-pool`, or run `/chatgpt-pool spend <label>`. It picks the credit that expires first and asks you to confirm. It warns you when ChatGPT reports nothing to reset.
 
 Usage and banked resets come from ChatGPT's `backend-api/wham` endpoints, the same ones the Codex CLI uses.
 
