@@ -83,3 +83,36 @@ export function nextAccountId(accounts: readonly Account[]): string {
 	const highest = Math.max(0, ...accounts.map((account) => Number(account.id.split("-").pop()) || 0));
 	return `chatgpt-${highest + 1}`;
 }
+
+export const STRATEGIES = {
+	"fill-first": "Fill first: use accounts in order, save the later ones for when the first runs out",
+	"round-robin": "Round robin: start each new conversation on the next account",
+	"least-used": "Least used: start new conversations on the account with the lowest usage",
+	"use-it-or-lose-it": "Use it or lose it: prefer the account whose usage window resets soonest",
+};
+export type Strategy = keyof typeof STRATEGIES;
+export type UsageSnapshot = { usedPercent: number; resetsAt: number };
+
+export function isStrategy(value: string): value is Strategy {
+	return Object.hasOwn(STRATEGIES, value);
+}
+
+export function orderAccounts(
+	accounts: readonly Account[],
+	strategy: Strategy,
+	usage: ReadonlyMap<string, UsageSnapshot>,
+	rotation: number,
+): Account[] {
+	if (strategy === "fill-first" || accounts.length === 0) return [...accounts];
+	if (strategy === "round-robin") {
+		const start = rotation % accounts.length;
+		return [...accounts.slice(start), ...accounts.slice(0, start)];
+	}
+	const known = accounts.filter((account) => usage.has(account.id) && (usage.get(account.id)?.usedPercent ?? 100) < 100);
+	const rest = accounts.filter((account) => !known.includes(account));
+	const key = (account: Account) => {
+		const snapshot = usage.get(account.id);
+		return strategy === "least-used" ? (snapshot?.usedPercent ?? 100) : (snapshot?.resetsAt ?? Number.POSITIVE_INFINITY);
+	};
+	return [...known.sort((a, b) => key(a) - key(b)), ...rest];
+}

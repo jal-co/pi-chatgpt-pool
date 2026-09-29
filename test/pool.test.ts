@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
 	limitCooldown,
 	nextAccountId,
+	orderAccounts,
 	parseResetAt,
 	pickAccount,
 	RATE_COOLDOWN_MS,
@@ -72,4 +73,40 @@ test("ignores missing, past, and malformed resets", () => {
 	assert.equal(parseResetAt(new Headers(), "not json", now), undefined);
 	assert.equal(parseResetAt(new Headers({ "retry-after": "Mon, 28 Sep 2026 00:00:00 GMT" }), "", now), undefined);
 	assert.equal(parseResetAt(new Headers({ "x-ratelimit-reset-requests": "soon" }), "", now), undefined);
+});
+
+const three = [
+	{ id: "a", label: "a" },
+	{ id: "b", label: "b" },
+	{ id: "c", label: "c" },
+];
+const ids = (list: { id: string }[]) => list.map((account) => account.id).join("");
+
+test("fill first keeps the order accounts were added", () => {
+	assert.equal(ids(orderAccounts(three, "fill-first", new Map(), 5)), "abc");
+});
+
+test("round robin rotates the starting account", () => {
+	assert.equal(ids(orderAccounts(three, "round-robin", new Map(), 0)), "abc");
+	assert.equal(ids(orderAccounts(three, "round-robin", new Map(), 1)), "bca");
+	assert.equal(ids(orderAccounts(three, "round-robin", new Map(), 5)), "cab");
+});
+
+test("least used prefers the lowest usage, unknown and exhausted accounts last", () => {
+	const usage = new Map([
+		["a", { usedPercent: 80, resetsAt: 3 }],
+		["b", { usedPercent: 100, resetsAt: 1 }],
+		["c", { usedPercent: 10, resetsAt: 2 }],
+	]);
+	assert.equal(ids(orderAccounts(three, "least-used", usage, 0)), "cab");
+	assert.equal(ids(orderAccounts(three, "least-used", new Map([["b", { usedPercent: 5, resetsAt: 1 }]]), 0)), "bac");
+});
+
+test("use it or lose it prefers the window that resets soonest", () => {
+	const usage = new Map([
+		["a", { usedPercent: 20, resetsAt: 300 }],
+		["b", { usedPercent: 90, resetsAt: 100 }],
+		["c", { usedPercent: 100, resetsAt: 50 }],
+	]);
+	assert.equal(ids(orderAccounts(three, "use-it-or-lose-it", usage, 0)), "bac");
 });

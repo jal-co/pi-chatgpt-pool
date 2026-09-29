@@ -3,8 +3,18 @@ import { dirname, join } from "node:path";
 import { getSupportedThinkingLevels, type Api, type Model, type Provider } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { BorderedLoader, type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { chatgptOAuth } from "./chatgpt-oauth.ts";
-import { type Account, limitCooldown, nextAccountId, parseResetAt, pickAccount } from "./pool.ts";
+import {
+	type Account,
+	isStrategy,
+	limitCooldown,
+	nextAccountId,
+	orderAccounts,
+	parseResetAt,
+	pickAccount,
+	STRATEGIES,
+	type Strategy,
+	type UsageSnapshot,
+} from "./pool.ts";
 import { fetchUsage, spendReset, type Usage } from "./usage.ts";
 
 const POOL_PROVIDER = "chatgpt";
@@ -19,14 +29,30 @@ function configPath(): string {
 	return join(getAgentDir(), "chatgpt-pool.json");
 }
 
-function loadAccounts(): Account[] {
-	if (!existsSync(configPath())) return [];
-	return JSON.parse(readFileSync(configPath(), "utf8")).accounts ?? [];
+type PoolConfig = { strategy: Strategy; rotation: number; accounts: Account[] };
+const USAGE_TTL_MS = 5 * 60 * 1000;
+
+function loadConfig(): PoolConfig {
+	if (!existsSync(configPath())) return { strategy: "fill-first", rotation: 0, accounts: [] };
+	const raw = JSON.parse(readFileSync(configPath(), "utf8"));
+	return {
+		strategy: isStrategy(raw.strategy ?? "") ? raw.strategy : "fill-first",
+		rotation: Number.isInteger(raw.rotation) ? raw.rotation : 0,
+		accounts: raw.accounts ?? [],
+	};
 }
 
-function saveAccounts(accounts: readonly Account[]): void {
+function saveConfig(config: PoolConfig): void {
 	mkdirSync(dirname(configPath()), { recursive: true });
-	writeFileSync(configPath(), `${JSON.stringify({ accounts }, null, 2)}\n`);
+	writeFileSync(configPath(), `${JSON.stringify(config, null, 2)}\n`);
+}
+
+function snapshotOf(usage: Usage): UsageSnapshot | undefined {
+	if (usage.windows.length === 0) return undefined;
+	return {
+		usedPercent: usage.limitReached ? 100 : Math.max(...usage.windows.map((w) => w.usedPercent)),
+		resetsAt: Math.min(...usage.windows.map((w) => w.resetsAt)),
+	};
 }
 
 type ResetListener = (accountId: string, resetsAt: number) => void;
@@ -42,16 +68,27 @@ function limitAwareFetch(accountId: string, onReset: ResetListener, base: typeof
 	};
 }
 
+function subscriptionModels(providers: readonly Provider[]): Model<Api>[] {
+	const openai = providers.find((provider) => provider.id === "openai");
+	if (!openai) throw new Error("pi-chatgpt-pool needs pi's built-in openai provider");
+	const codex = new Set(providers.find((provider) => provider.id === "openai-codex")?.getModels().map((model) => model.id));
+	return openai.getModels().filter((model) => codex.has(model.id));
+}
+
 function accountProvider(openai: Provider, account: Account, onReset: ResetListener): Provider {
 	const name = `ChatGPT (${account.label})`;
-	const models: Model<Api>[] = openai
-		.getModels()
-		.map((model) => ({ ...model, provider: account.id, compat: { ...model.compat, ...CHATGPT_COMPAT } }));
+	const signIn = openai.auth.oauth;
+	if (!signIn) throw new Error("pi's openai provider has no Sign in with ChatGPT flow; update pi to 0.99.1 or later");
+	const models: Model<Api>[] = subscriptionModels(builtinProviders()).map((model) => ({
+		...model,
+		provider: account.id,
+		compat: { ...model.compat, ...CHATGPT_COMPAT },
+	}));
 	return {
 		id: account.id,
 		name,
 		baseUrl: openai.baseUrl,
-		auth: { oauth: chatgptOAuth(name) },
+		auth: { oauth: { ...signIn, name } },
 		getModels: () => models,
 		stream: (model, context, options) => openai.stream(model, context, options),
 		streamSimple: (model, context, options) =>
@@ -74,16 +111,45 @@ function formatReset(at: number): string {
 }
 
 export default function chatgptPool(pi: ExtensionAPI) {
-	const openai = builtinProviders().find((provider) => provider.id === "openai");
+	const providers = builtinProviders();
+	const openai = providers.find((provider) => provider.id === "openai");
 	if (!openai) throw new Error("pi-chatgpt-pool needs pi's built-in openai provider");
 
-	let accounts = loadAccounts();
+	let { strategy, accounts } = loadConfig();
+	const update = (change: (config: PoolConfig) => PoolConfig) => {
+		const next = change(loadConfig());
+		saveConfig(next);
+		({ strategy, accounts } = next);
+		return next;
+	};
+	const usageCache = new Map<string, { snapshot: UsageSnapshot; at: number }>();
+
+	const rememberUsage = (accountId: string, usage: Usage) => {
+		const snapshot = snapshotOf(usage);
+		if (snapshot) usageCache.set(accountId, { snapshot, at: Date.now() });
+	};
+
+	const freshUsage = async (ctx: ExtensionContext, signal?: AbortSignal) => {
+		if (strategy !== "least-used" && strategy !== "use-it-or-lose-it") return new Map<string, UsageSnapshot>();
+		await Promise.all(
+			accounts.map(async (account) => {
+				const cached = usageCache.get(account.id);
+				if (cached && Date.now() - cached.at < USAGE_TTL_MS) return;
+				const token = await ctx.modelRegistry.getApiKeyForProvider(account.id).catch(() => undefined);
+				if (!token || signal?.aborted) return;
+				await fetchUsage(token).then((usage) => rememberUsage(account.id, usage), () => undefined);
+			}),
+		);
+		return new Map([...usageCache].map(([id, entry]) => [id, entry.snapshot]));
+	};
 	const reportedResets = new Map<string, number>();
 	const onReset: ResetListener = (accountId, resetsAt) => reportedResets.set(accountId, resetsAt);
 
 	const setResetsAt = (accountId: string, resetsAt: number | undefined) => {
-		accounts = accounts.map((account) => (account.id === accountId ? { ...account, resetsAt } : account));
-		saveAccounts(accounts);
+		update((config) => ({
+			...config,
+			accounts: config.accounts.map((account) => (account.id === accountId ? { ...account, resetsAt } : account)),
+		}));
 	};
 
 	const isUsable = (ctx: ExtensionContext, accountId: string, modelId: string) => {
@@ -111,7 +177,14 @@ export default function chatgptPool(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => updateStatus(ctx));
 	pi.on("model_select", (event, ctx) => updateStatus(ctx, event.model.provider));
 
-	for (const model of openai.getModels()) {
+	let pooledModelsRegistered = false;
+	const registerPooledModels = () => {
+		if (pooledModelsRegistered || accounts.length === 0) return;
+		pooledModelsRegistered = true;
+		for (const model of subscriptionModels(providers)) registerPooledModel(model);
+	};
+
+	const registerPooledModel = (model: Model<Api>) =>
 		pi.registerVirtualModel({
 			provider: POOL_PROVIDER,
 			id: model.id,
@@ -120,9 +193,17 @@ export default function chatgptPool(pi: ExtensionAPI) {
 			contextWindow: model.contextWindow,
 			maxTokens: model.maxTokens,
 			input: model.input,
-			route(request, ctx) {
+			async route(request, ctx) {
 				const sticky = (request.failed ?? request.previous)?.model.provider;
-				const account = pickAccount(accounts, (id) => isUsable(ctx, id, model.id), sticky);
+				const usable = (id: string) => isUsable(ctx, id, model.id);
+				const keepSticky = sticky !== undefined && usable(sticky);
+				const usage = keepSticky ? new Map<string, UsageSnapshot>() : await freshUsage(ctx, request.signal);
+				const rotation =
+					!keepSticky && sticky === undefined && strategy === "round-robin"
+						? update((config) => ({ ...config, rotation: config.rotation + 1 })).rotation - 1
+						: 0;
+				const ordered = keepSticky ? accounts : orderAccounts(accounts, strategy, usage, rotation);
+				const account = pickAccount(ordered, usable, sticky);
 				const routed = account && ctx.modelRegistry.find(account.id, model.id);
 				if (!routed) {
 					throw new Error(
@@ -138,7 +219,8 @@ export default function chatgptPool(pi: ExtensionAPI) {
 				return { model: routed, thinkingLevel: request.thinkingLevel };
 			},
 		});
-	}
+
+	registerPooledModels();
 
 	pi.on("message_end", (event, ctx) => {
 		const message = event.message;
@@ -169,6 +251,7 @@ export default function chatgptPool(pi: ExtensionAPI) {
 				if (!token || signal?.aborted) return { account, signedIn: !!token };
 				try {
 					const usage = await fetchUsage(token);
+					rememberUsage(account.id, usage);
 					const limitedUntil = usage.limitReached ? Math.max(...usage.windows.map((w) => w.resetsAt)) : undefined;
 					if (limitedUntil !== account.resetsAt && (usage.limitReached || (account.resetsAt ?? 0) > Date.now())) {
 						setResetsAt(account.id, limitedUntil);
@@ -210,16 +293,15 @@ export default function chatgptPool(pi: ExtensionAPI) {
 
 	const addAccount = (ctx: ExtensionContext, label: string) => {
 		if (findAccount(label)) return ctx.ui.notify(`There is already an account named "${label}".`, "warning");
-		const account = { id: nextAccountId(accounts), label };
-		accounts = [...accounts, account];
-		saveAccounts(accounts);
+		const account = { id: nextAccountId(loadConfig().accounts), label };
+		update((config) => ({ ...config, accounts: [...config.accounts, account] }));
+		registerPooledModels();
 		pi.registerProvider(accountProvider(openai, account, onReset));
 		ctx.ui.notify(`Added ChatGPT (${label}). Run /login and pick it to sign in.`, "info");
 	};
 
 	const removeAccount = (ctx: ExtensionContext, account: Account) => {
-		accounts = accounts.filter((candidate) => candidate.id !== account.id);
-		saveAccounts(accounts);
+		update((config) => ({ ...config, accounts: config.accounts.filter((candidate) => candidate.id !== account.id) }));
 		pi.unregisterProvider(account.id);
 		updateStatus(ctx);
 		ctx.ui.notify(
@@ -258,14 +340,28 @@ export default function chatgptPool(pi: ExtensionAPI) {
 		);
 	};
 
+	const setStrategy = (ctx: ExtensionContext, next: Strategy) => {
+		update((config) => ({ ...config, strategy: next }));
+		ctx.ui.notify(`${STRATEGIES[next]}.`, "info");
+	};
+
+	const chooseStrategy = async (ctx: ExtensionContext) => {
+		const labels = Object.values(STRATEGIES).map((text) => (text === STRATEGIES[strategy] ? `${text} (current)` : text));
+		const picked = await ctx.ui.select("Routing strategy for new conversations", labels);
+		const next = Object.keys(STRATEGIES).find((_key, index) => labels[index] === picked);
+		if (next && isStrategy(next)) setStrategy(ctx, next);
+	};
+
 	const openPool = async (ctx: ExtensionContext) => {
 		const statuses = await withLoader(ctx, "Checking ChatGPT accounts...", (signal) => loadStatuses(ctx, signal));
 		if (!statuses) return;
 		updateStatus(ctx);
 		const addOption = "+ Add account";
-		const options = [...statuses.map(describe), addOption];
+		const strategyOption = `Strategy: ${STRATEGIES[strategy].split(":")[0]}`;
+		const options = [...statuses.map(describe), addOption, strategyOption];
 		const picked = await ctx.ui.select("ChatGPT pool", options);
 		if (!picked) return;
+		if (picked === strategyOption) return chooseStrategy(ctx);
 		if (picked === addOption) {
 			const label = (await ctx.ui.input("Label for the new ChatGPT account", "work"))?.trim();
 			if (label) addAccount(ctx, label);
@@ -295,13 +391,19 @@ export default function chatgptPool(pi: ExtensionAPI) {
 		{ value: "remove", label: "remove", description: "Remove an account" },
 		{ value: "spend", label: "spend", description: "Spend a banked reset, after confirming" },
 		{ value: "reset", label: "reset", description: "Forget recorded limits" },
+		{ value: "strategy", label: "strategy", description: "Choose how new conversations pick an account" },
 	];
 
 	pi.registerCommand("chatgpt-pool", {
-		description: "Manage pooled ChatGPT accounts: usage, banked resets, add, remove, spend, reset",
+		description: "Manage pooled ChatGPT accounts: usage, banked resets, strategy, add, remove, spend, reset",
 		getArgumentCompletions(prefix) {
 			const [action, ...rest] = prefix.split(" ");
 			if (rest.length === 0) return SUBCOMMANDS.filter((item) => item.value.startsWith(action));
+			if (action === "strategy") {
+				return Object.entries(STRATEGIES)
+					.filter(([name]) => name.startsWith(rest.join(" ")))
+					.map(([name, description]) => ({ value: `strategy ${name}`, label: name, description }));
+			}
 			if (action !== "remove" && action !== "spend") return null;
 			const partial = rest.join(" ");
 			return accounts
@@ -324,10 +426,17 @@ export default function chatgptPool(pi: ExtensionAPI) {
 			}
 
 			if (action === "reset") {
-				accounts = accounts.map(({ id, label }) => ({ id, label }));
-				saveAccounts(accounts);
+				update((config) => ({ ...config, accounts: config.accounts.map(({ id, label }) => ({ id, label })) }));
 				updateStatus(ctx);
 				return ctx.ui.notify("Cleared recorded limits. Every signed-in account is back in rotation.", "info");
+			}
+
+			if (action === "strategy") {
+				if (isStrategy(label)) return setStrategy(ctx, label);
+				if (label || !ctx.hasUI) {
+					return ctx.ui.notify(`Usage: /chatgpt-pool strategy <${Object.keys(STRATEGIES).join(" | ")}>`, "warning");
+				}
+				return chooseStrategy(ctx);
 			}
 
 			if (!ctx.hasUI) {
@@ -342,7 +451,7 @@ export default function chatgptPool(pi: ExtensionAPI) {
 				return spend(ctx, account);
 			}
 
-			if (action) return ctx.ui.notify(`Unknown action "${action}". Use add, remove, spend, or reset.`, "warning");
+			if (action) return ctx.ui.notify(`Unknown action "${action}". Use add, remove, spend, reset, or strategy.`, "warning");
 			if (accounts.length === 0) {
 				const label = (await ctx.ui.input("No ChatGPT accounts yet. Label for the first one", "personal"))?.trim();
 				if (label) addAccount(ctx, label);
