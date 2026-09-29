@@ -79,3 +79,11 @@ The plugin never spends one on its own. Pick the account in `/chatgpt-pool`, or 
 
 Usage and banked resets come from ChatGPT's `backend-api/wham` endpoints, the same ones the Codex CLI uses.
 
+## Releasing
+
+```bash
+npm version patch   # or minor / major: bumps package.json, commits, and tags
+git push --follow-tags
+```
+
+Pushing a `v*` tag runs `.github/workflows/publish.yml`. It checks that the tag matches `package.json`, runs the type check and tests, publishes to npm with provenance through npm trusted publishing, and creates a GitHub release with generated notes.
