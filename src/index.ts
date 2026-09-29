@@ -6,6 +6,7 @@ import { BorderedLoader, type ExtensionAPI, type ExtensionContext, getAgentDir }
 import {
 	type Account,
 	isStrategy,
+	failoverMessage,
 	limitCooldown,
 	nextAccountId,
 	orderAccounts,
@@ -15,6 +16,8 @@ import {
 	type Strategy,
 	type UsageSnapshot,
 } from "./pool.ts";
+import { formatIn, formatReset, formatWindow } from "./format.ts";
+import { type AccountStatus, type PanelAction, PoolPanel } from "./panel.ts";
 import { fetchUsage, spendReset, type Usage } from "./usage.ts";
 
 const POOL_PROVIDER = "chatgpt";
@@ -96,20 +99,6 @@ function accountProvider(openai: Provider, account: Account, onReset: ResetListe
 	};
 }
 
-function formatWindow(seconds: number): string {
-	if (seconds % 604800 === 0) return seconds === 604800 ? "weekly" : `${seconds / 604800}-week`;
-	if (seconds % 3600 === 0) return `${seconds / 3600}h`;
-	return `${Math.round(seconds / 60)}m`;
-}
-
-function formatReset(at: number): string {
-	const date = new Date(at);
-	const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-	return date.toDateString() === new Date().toDateString()
-		? `at ${time}`
-		: `${date.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} at ${time}`;
-}
-
 export default function chatgptPool(pi: ExtensionAPI) {
 	const providers = builtinProviders();
 	const openai = providers.find((provider) => provider.id === "openai");
@@ -142,6 +131,14 @@ export default function chatgptPool(pi: ExtensionAPI) {
 		);
 		return new Map([...usageCache].map(([id, entry]) => [id, entry.snapshot]));
 	};
+	const refreshUsage = async (ctx: ExtensionContext, accountId: string) => {
+		const cached = usageCache.get(accountId);
+		if (cached && Date.now() - cached.at < USAGE_TTL_MS) return;
+		const token = await ctx.modelRegistry.getApiKeyForProvider(accountId).catch(() => undefined);
+		if (!token) return;
+		await fetchUsage(token).then((usage) => rememberUsage(accountId, usage), () => undefined);
+	};
+
 	const reportedResets = new Map<string, number>();
 	const onReset: ResetListener = (accountId, resetsAt) => reportedResets.set(accountId, resetsAt);
 
@@ -165,11 +162,16 @@ export default function chatgptPool(pi: ExtensionAPI) {
 		if (provider !== POOL_PROVIDER) return ctx.ui.setStatus(STATUS_KEY, undefined);
 		const now = Date.now();
 		const active = accounts.find((account) => account.id === lastRouted);
+		const snapshot = active && usageCache.get(active.id)?.snapshot;
 		const limited = accounts.filter((account) => (account.resetsAt ?? 0) > now);
 		const parts = [`chatgpt: ${active?.label ?? "pool"}`];
+		if (snapshot) {
+			parts[0] += ` ${Math.round(snapshot.usedPercent)}%`;
+			parts.push(`resets in ${formatIn(snapshot.resetsAt - now)}`);
+		}
 		if (limited.length > 0) {
 			const next = Math.min(...limited.map((account) => account.resetsAt ?? now));
-			parts.push(`${limited.length} limited, next back ${formatReset(next)}`);
+			parts.push(`${limited.length} limited, next back in ${formatIn(next - now)}`);
 		}
 		ctx.ui.setStatus(STATUS_KEY, parts.join(" · "));
 	};
@@ -212,10 +214,18 @@ export default function chatgptPool(pi: ExtensionAPI) {
 							: "Every ChatGPT account in the pool is signed out or limited. Run /chatgpt-pool to see reset times and banked resets.",
 					);
 				}
+				if (sticky !== undefined && sticky !== routed.provider && ctx.hasUI) {
+					const from = accounts.find((candidate) => candidate.id === sticky);
+					const until = from?.resetsAt && from.resetsAt > Date.now() ? ` (back in ${formatIn(from.resetsAt - Date.now())})` : "";
+					ctx.ui.notify(`ChatGPT pool: ${from?.label ?? sticky} is limited${until}, switched to ${account.label}.`, "info");
+				}
 				if (lastRouted !== routed.provider) {
 					lastRouted = routed.provider;
 					updateStatus(ctx);
 				}
+				refreshUsage(ctx, routed.provider)
+					.then(() => updateStatus(ctx, POOL_PROVIDER))
+					.catch(() => undefined);
 				return { model: routed, thinkingLevel: request.thinkingLevel };
 			},
 		});
@@ -237,12 +247,10 @@ export default function chatgptPool(pi: ExtensionAPI) {
 		return {
 			message: {
 				...message,
-				errorMessage: `ChatGPT account "${account.label}" is rate limited; switching to another account in the pool.`,
+				errorMessage: failoverMessage(account.label),
 			},
 		};
 	});
-
-	type AccountStatus = { account: Account; signedIn: boolean; usage?: Usage; error?: string };
 
 	const loadStatuses = (ctx: ExtensionContext, signal?: AbortSignal): Promise<AccountStatus[]> =>
 		Promise.all(
@@ -352,7 +360,50 @@ export default function chatgptPool(pi: ExtensionAPI) {
 		if (next && isStrategy(next)) setStrategy(ctx, next);
 	};
 
+	const runPanel = async (ctx: ExtensionContext) => {
+		let statuses = await withLoader(ctx, "Checking ChatGPT accounts...", (signal) => loadStatuses(ctx, signal));
+		while (statuses) {
+			updateStatus(ctx);
+			const current = statuses.map((status) => ({
+				...status,
+				account: accounts.find((account) => account.id === status.account.id) ?? status.account,
+			}));
+			const strategyName = STRATEGIES[strategy].split(":")[0];
+			const action = await ctx.ui.custom<PanelAction>(
+				(tui, theme, _keybindings, done) => new PoolPanel(tui, theme, current, strategyName, lastRouted, done),
+			);
+			if (!action || action.type === "close") return;
+			const status = "accountId" in action ? current.find((entry) => entry.account.id === action.accountId) : undefined;
+			let reload = false;
+			if (action.type === "refresh") {
+				reload = true;
+			} else if (action.type === "add") {
+				const label = (await ctx.ui.input("Label for the new ChatGPT account", "work"))?.trim();
+				if (label) addAccount(ctx, label);
+				reload = !!label;
+			} else if (action.type === "strategy") {
+				await chooseStrategy(ctx);
+			} else if (status && action.type === "spend") {
+				await spend(ctx, status.account, status.usage);
+				reload = true;
+			} else if (status && action.type === "clear") {
+				setResetsAt(status.account.id, undefined);
+				ctx.ui.notify(`ChatGPT (${status.account.label}) is back in rotation.`, "info");
+			} else if (status && action.type === "remove") {
+				if (await ctx.ui.confirm(`Remove ${status.account.label}?`, "It will no longer be used by the pool.")) {
+					removeAccount(ctx, status.account);
+					statuses = statuses.filter((entry) => entry.account.id !== status.account.id);
+				}
+			}
+			if (reload) {
+				usageCache.clear();
+				statuses = await withLoader(ctx, "Checking ChatGPT accounts...", (signal) => loadStatuses(ctx, signal));
+			}
+		}
+	};
+
 	const openPool = async (ctx: ExtensionContext) => {
+		if (ctx.mode === "tui") return runPanel(ctx);
 		const statuses = await withLoader(ctx, "Checking ChatGPT accounts...", (signal) => loadStatuses(ctx, signal));
 		if (!statuses) return;
 		updateStatus(ctx);

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import {
+	failoverMessage,
 	limitCooldown,
 	nextAccountId,
 	orderAccounts,
@@ -109,4 +111,9 @@ test("use it or lose it prefers the window that resets soonest", () => {
 		["c", { usedPercent: 100, resetsAt: 50 }],
 	]);
 	assert.equal(ids(orderAccounts(three, "use-it-or-lose-it", usage, 0)), "bac");
+});
+
+test("the failover message is one pi retries", () => {
+	const message = { role: "assistant", stopReason: "error", errorMessage: failoverMessage("personal") } as const;
+	assert.equal(isRetryableAssistantError({ ...message, content: [], api: "openai-responses", provider: "chatgpt-1", model: "m", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, timestamp: 0 }), true);
 });

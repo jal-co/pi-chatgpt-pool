@@ -32,14 +32,33 @@ The pool offers the ChatGPT subscription models: the OpenAI models that pi also 
 
 | Command | What it does |
 | --- | --- |
-| `/chatgpt-pool` | Open the pool: each account's usage, reset times, and banked resets. Pick an account to spend a reset, clear its limit, or remove it |
+| `/chatgpt-pool` | Open the pool panel (see below) |
 | `/chatgpt-pool add <label>` | Add an account slot. Sign in to it with `/login` |
 | `/chatgpt-pool remove <label>` | Remove an account. Run `/logout` for it first to delete its token |
 | `/chatgpt-pool spend <label>` | Spend one banked reset on that account, after you confirm |
 | `/chatgpt-pool strategy <name>` | Set the routing strategy: `fill-first`, `round-robin`, `least-used`, or `use-it-or-lose-it` |
 | `/chatgpt-pool reset` | Forget recorded limits, for example after a limit clears early |
 
-The command autocompletes its actions and account labels. The footer shows `chatgpt: <account>` while a pooled model is selected, plus how many accounts are limited and when the next one comes back.
+The command autocompletes its actions and account labels.
+
+## Pool panel
+
+`/chatgpt-pool` opens a panel with every account, its state (ready, limited with a countdown, or not signed in), a usage bar per window with the time until it resets, and its banked resets.
+
+| Key | Action |
+| --- | --- |
+| `↑` `↓` or `j` `k` | Select an account |
+| `s` | Spend a banked reset on the selected account, after you confirm |
+| `c` | Clear the selected account's recorded limit |
+| `d` | Remove the selected account |
+| `a` | Add an account |
+| `t` | Choose the strategy |
+| `r` | Refresh usage |
+| `esc` or `q` | Close |
+
+Over RPC the same actions are offered as a list instead.
+
+While a pooled model is selected, the footer shows the account in use with its usage and reset time, for example `chatgpt: work 42% · resets in 3d 4h`, plus how many accounts are limited. When a conversation moves to another account, pi shows a notice such as `ChatGPT pool: personal is limited (back in 1h 30m), switched to work.`
 
 `/chatgpt-pool` and `spend` need the interactive UI; in `--print` or `--mode json` they stop with an error instead of spending anything. From a shell, use pi's own commands:
 

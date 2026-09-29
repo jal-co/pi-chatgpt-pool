@@ -3,6 +3,10 @@ export type Account = { id: string; label: string; resetsAt?: number };
 const USAGE_LIMIT = /usage.?limit|subscription_sharing_usage_limit_exceeded|insufficient_quota|quota/i;
 const RATE_LIMIT = /rate.?limit|too many requests|\b429\b/i;
 
+export function failoverMessage(label: string): string {
+	return `ChatGPT account "${label}" hit its rate limit; switching to another account in the pool.`;
+}
+
 export const USAGE_COOLDOWN_MS = 60 * 60 * 1000;
 export const RATE_COOLDOWN_MS = 60 * 1000;
 
