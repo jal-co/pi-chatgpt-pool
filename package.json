@@ -11,6 +11,15 @@
     "failover"
   ],
   "license": "MIT",
+  "author": "Justin Levine",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jal-co/pi-chatgpt-pool.git"
+  },
+  "homepage": "https://github.com/jal-co/pi-chatgpt-pool#readme",
+  "bugs": {
+    "url": "https://github.com/jal-co/pi-chatgpt-pool/issues"
+  },
   "type": "module",
   "files": [
     "src",
