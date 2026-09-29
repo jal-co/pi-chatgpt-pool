@@ -12,13 +12,14 @@ Requires pi 0.99.1 or later. The plugin uses pi's own Sign in with ChatGPT flow,
 
 ## Set up accounts
 
-Run `/chatgpt-pool` and choose **+ Add account**, or add them directly:
+Run `/chatgpt-pool`, press `a` to add an account, then Enter to sign in. Or from the editor:
 
 ```text
 /chatgpt-pool add personal
 /chatgpt-pool add work
-/login
 ```
+
+After adding an account, pi fills in `/login chatgpt-<n>` for it; press Enter to open the ChatGPT sign-in. Sign in to each account with a different ChatGPT account. `/chatgpt-pool login <label>` does the same for an existing account.
 
 `/login` lists each account as `ChatGPT (<label>)`, or under a name you choose with `/chatgpt-pool name`. Renaming keeps the account signed in. Sign in to each one with a different ChatGPT account. Then pick a pooled model:
 
@@ -34,6 +35,7 @@ The pool offers the ChatGPT subscription models: the OpenAI models that pi also 
 | --- | --- |
 | `/chatgpt-pool` | Open the pool panel (see below) |
 | `/chatgpt-pool add <label>` | Add an account slot. Sign in to it with `/login` |
+| `/chatgpt-pool login <label>` | Fill in `/login` for that account, so Enter starts its sign-in |
 | `/chatgpt-pool name <label> <name>` | Set the name the account shows in `/login`, for example `Work (jal@mastra.ai)`. Leave the name empty to go back to `ChatGPT (<label>)` |
 | `/chatgpt-pool remove <label>` | Remove an account. Run `/logout` for it first to delete its token |
 | `/chatgpt-pool spend <label>` | Spend one banked reset on that account, after you confirm |
@@ -49,6 +51,7 @@ The command autocompletes its actions and account labels.
 | Key | Action |
 | --- | --- |
 | `↑` `↓` or `j` `k` | Select an account |
+| `enter` | Sign in to the selected account (fills in `/login` for it; press Enter again) |
 | `s` | Spend a banked reset on the selected account, after you confirm |
 | `c` | Clear the selected account's recorded limit |
 | `n` | Set the name the selected account shows in `/login` |
